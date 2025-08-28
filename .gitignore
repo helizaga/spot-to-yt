@@ -1,0 +1,35 @@
+# Environment variables
+.env
+
+# Authentication files
+oauth.json
+.cache-spotify-liked
+
+# Output files
+unmatched_spotify_likes.csv
+
+# Progress tracking
+likes_progress.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+spotify_ytmusic_likes_cache.json
