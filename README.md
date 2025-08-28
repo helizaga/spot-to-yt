@@ -29,7 +29,7 @@ Transfer your Spotify Liked Songs to YouTube Music by automatically liking match
 cd spot-to-yt
 
 # Install required packages
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ### 2. Set Up Spotify API
@@ -51,8 +51,8 @@ pip install -r requirements.txt
 2. Create a new project or select an existing one
 3. Enable the YouTube Data API v3
 4. Create OAuth 2.0 credentials:
-   - Application type: Desktop app
-   - Download the credentials JSON
+   - Application type: **TVs and Limited Input devices** (Important!)
+   - Note: Do NOT select "Desktop app" - use "TVs and Limited Input devices"
 5. Note down the Client ID and Client Secret
 
 ### 4. Configure Environment Variables
@@ -72,23 +72,40 @@ cp .env.example .env
 
 Run the YouTube Music OAuth setup (one-time only):
 
+**Option 1: Using the setup script (recommended)**
+
 ```bash
-python -m ytmusicapi oauth
+python3 setup_youtube_oauth.py
+```
+
+**Option 2: Using ytmusicapi directly**
+
+```bash
+# If you have your credentials in .env:
+ytmusicapi oauth --file oauth.json --client-id "$YTM_CLIENT_ID" --client-secret "$YTM_CLIENT_SECRET"
+
+# Or provide them directly:
+ytmusicapi oauth --file oauth.json --client-id YOUR_CLIENT_ID --client-secret YOUR_CLIENT_SECRET
 ```
 
 This will:
-1. Open a browser window for authentication
-2. Sign in with your Google/YouTube account
-3. Authorize the application
-4. Automatically save credentials to `oauth.json`
+
+1. Prompt for your Google API credentials (if not in .env when using the setup script)
+2. Display a URL and code for authentication
+3. You'll visit the URL, sign in with your Google/YouTube account
+4. Enter the authorization code back in the terminal
+5. Automatically save credentials to `oauth.json`
+
+**Note**: The command uses the Google API flow for TV devices, so you'll need to manually enter a code rather than being redirected automatically.
 
 ### 6. Run the Transfer
 
 ```bash
-python spotify_to_ytmusic_like_optimal.py
+python3 spotify_to_ytmusic_like_optimal.py
 ```
 
 The script will:
+
 1. Authenticate with Spotify (opens browser for first-time auth)
 2. Fetch all your Spotify liked songs
 3. Load your existing YouTube Music library to detect already liked songs
@@ -103,12 +120,14 @@ The script will:
 Environment variables you can set in your `.env` file:
 
 ### Required
+
 - `SPOTIFY_CLIENT_ID`: Your Spotify app client ID
 - `SPOTIFY_CLIENT_SECRET`: Your Spotify app client secret
 - `YTM_CLIENT_ID`: Your YouTube OAuth client ID
 - `YTM_CLIENT_SECRET`: Your YouTube OAuth client secret
 
 ### Optional Performance Tuning
+
 - `CONCURRENT_SEARCHES`: Number of parallel search threads (default: 10)
 - `CONCURRENT_LIKES`: Number of parallel like threads (default: 5)
 - `MAX_CONCURRENT_REQUESTS`: Max concurrent API requests (default: 5)
@@ -126,38 +145,47 @@ Environment variables you can set in your `.env` file:
 ## Features in Detail
 
 ### Smart Matching
+
 - Uses fuzzy string matching for titles
 - Checks artist names for matches
 - Compares song duration (within 5-10 second tolerance)
 - Tries multiple search strategies before giving up
 
 ### Thread Safety
+
 - All cache operations are thread-safe
 - Progress tracking prevents skipping songs on resume
 - Concurrent API calls with proper rate limiting
 
 ### Resume Capability
+
 If the script is interrupted, it will automatically resume from where it left off on the next run.
 
 ## Troubleshooting
 
 ### "YTM_CLIENT_ID and YTM_CLIENT_SECRET must be set"
+
 These are now required. Get them from Google Cloud Console after setting up OAuth2 credentials.
 
 ### "YouTube Music OAuth file not found"
-Run `python -m ytmusicapi oauth` first to authenticate.
+
+Run `python3 setup_youtube_oauth.py` or `ytmusicapi oauth` to authenticate. Make sure you have your YTM_CLIENT_ID and YTM_CLIENT_SECRET set.
 
 ### Songs not matching correctly
+
 The script uses smart matching with duration checking. Check `unmatched_spotify_likes.csv` for songs to add manually. The CSV includes:
+
 - Song title and artists
 - Album name
 - Spotify URL for easy reference
 - Spotify track ID for exact identification
 
 ### Rate limiting errors
+
 Adjust `YTM_MIN_INTERVAL_MS` in your `.env` file to increase the delay between requests (in milliseconds).
 
 ### Already liked songs
+
 The script loads your YouTube Music library on startup to avoid re-liking songs. Songs already in your library will be skipped.
 
 ## Privacy & Security
