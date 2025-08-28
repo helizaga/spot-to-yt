@@ -13,6 +13,9 @@ import csv
 import json
 import time
 import re
+import unicodedata
+import tempfile
+import argparse
 from typing import Optional, List, Dict, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
@@ -177,27 +180,43 @@ class CacheManager:
         return {}
 
     def save_cache(self, force=False):
-        """Save cache to disk with rate limiting"""
+        """Save cache to disk with rate limiting and atomic writes"""
         with self.lock:
             current_time = time.time()
             if force or (
                 current_time - self.last_save_time > 30
             ):  # Save every 30 seconds
                 self.cache["liked_songs"] = list(self.liked_songs)
-                with open(self.cache_file, "w", encoding="utf-8") as f:
-                    json.dump(self.cache, f, indent=2)
+                # Write to temp file and atomically replace
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    delete=False,
+                    dir=os.path.dirname(self.cache_file),
+                ) as tf:
+                    json.dump(self.cache, tf, indent=2)
+                    temp_path = tf.name
+                os.replace(temp_path, self.cache_file)
                 self.last_save_time = current_time
 
     def save_progress(self, processed: int, total: int):
-        """Save progress for resuming"""
+        """Save progress for resuming with atomic writes"""
         with self.lock:
             self.progress = {
                 "processed": processed,
                 "total": total,
                 "timestamp": time.time(),
             }
-            with open(self.progress_file, "w", encoding="utf-8") as f:
-                json.dump(self.progress, f, indent=2)
+            # Write to temp file and atomically replace
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                delete=False,
+                dir=os.path.dirname(self.progress_file) or ".",
+            ) as tf:
+                json.dump(self.progress, tf, indent=2)
+                temp_path = tf.name
+            os.replace(temp_path, self.progress_file)
 
     def mark_completed(self, index: int) -> int:
         """Mark an index as completed and return the new contiguous processed count"""
@@ -264,9 +283,29 @@ class CacheManager:
         with self.lock:
             self.liked_songs = liked_songs
 
+    def prime_completed(self, upto: int):
+        """Pre-seed completed indices when resuming from a checkpoint"""
+        with self.lock:
+            self.completed_indices.update(range(upto))
+
+
+def _parse_duration_seconds(s: str) -> Optional[int]:
+    """Parse duration string like '3:45' to seconds"""
+    try:
+        parts = [int(p) for p in s.split(":")]
+        sec = 0
+        for p in parts:
+            sec = sec * 60 + p
+        return sec
+    except (ValueError, AttributeError):
+        return None
+
 
 def normalize_string(s: str) -> str:
-    """Normalize string for better matching"""
+    """Normalize string for better matching, including accent removal"""
+    # Normalize unicode characters (remove accents/diacritics)
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
     # Remove special characters, convert to lowercase, strip whitespace
     s = re.sub(r"[^\w\s]", "", s.lower())
     s = re.sub(r"\s+", " ", s).strip()
@@ -303,18 +342,22 @@ def smart_match(
 
     # Duration matching if available
     duration_score = 1.0
-    if spotify_duration_ms and result.get("duration_seconds"):
-        spotify_duration_s = spotify_duration_ms / 1000
+    if spotify_duration_ms:
         yt_duration = result.get("duration_seconds")
-        duration_diff = abs(spotify_duration_s - yt_duration)
-        if duration_diff <= 5:  # Within 5 seconds
-            duration_score = 1.0
-        elif duration_diff <= 10:
-            duration_score = 0.8
-        else:
-            duration_score = max(
-                0.5, 1 - duration_diff / 60
-            )  # Penalty for large differences
+        if yt_duration is None and result.get("duration"):
+            yt_duration = _parse_duration_seconds(result["duration"])
+
+        if yt_duration:
+            spotify_duration_s = spotify_duration_ms / 1000
+            duration_diff = abs(spotify_duration_s - yt_duration)
+            if duration_diff <= 5:  # Within 5 seconds
+                duration_score = 1.0
+            elif duration_diff <= 10:
+                duration_score = 0.8
+            else:
+                duration_score = max(
+                    0.5, 1 - duration_diff / 60
+                )  # Penalty for large differences
 
     if not title_match or not artist_match:
         return 0
@@ -328,7 +371,7 @@ def smart_match(
     return score
 
 
-def spotify_client():
+def spotify_client() -> spotipy.Spotify:
     """Initialize Spotify client"""
     return spotipy.Spotify(
         auth_manager=SpotifyOAuth(
@@ -387,7 +430,7 @@ def search_song(
     ytm_safe: ThreadSafeYTMusic,
     song_data: Dict[str, any],
     cache_manager: CacheManager,
-) -> Dict:
+) -> Dict[str, any]:
     """Enhanced search with smart matching"""
     title = song_data["title"]
     artists = song_data["artists"]
@@ -438,14 +481,14 @@ def search_song(
                 video_id = best_match.get("videoId")
                 break
 
-            # Fallback to first result only on last query if score is reasonable
+            # Fallback to best match on last query if score is reasonable
             if (
                 not video_id
-                and results
+                and best_match
                 and q_idx == len(queries) - 1
                 and best_score > 0.5
             ):
-                video_id = results[0].get("videoId")
+                video_id = best_match.get("videoId")
 
             if video_id:
                 break
@@ -481,11 +524,24 @@ def search_song(
 def like_single_song(
     ytm_safe: ThreadSafeYTMusic, song: Dict, cache_manager: CacheManager
 ) -> bool:
-    """Like a single song with error handling"""
+    """Like a single song with error handling and response validation"""
     try:
-        ytm_safe.rate_song(song["video_id"], "LIKE")
-        cache_manager.mark_as_liked(song["video_id"])
-        return True
+        resp = ytm_safe.rate_song(song["video_id"], "LIKE")
+        ok = True
+        if isinstance(resp, dict):
+            status = (
+                resp.get("status")
+                or (resp.get("feedbackResponses") or [{}])[0].get("responseStatus")
+                or ""
+            ).upper()
+            ok = ("SUCCEED" in status) or (status == "SUCCESS")
+        if ok:
+            cache_manager.mark_as_liked(song["video_id"])
+            return True
+        print(
+            f"  Failed to like '{song['title']}': API returned non-success status: {status}"
+        )
+        return False
     except (
         ConnectionError,
         OSError,
@@ -499,11 +555,20 @@ def like_single_song(
 
 
 def like_songs_concurrent(
-    ytm_safe: ThreadSafeYTMusic, songs_to_like: List[Dict], cache_manager: CacheManager
+    ytm_safe: ThreadSafeYTMusic,
+    songs_to_like: List[Dict],
+    cache_manager: CacheManager,
+    dry_run: bool = False,
 ) -> int:
     """Like songs concurrently for maximum speed"""
     if not songs_to_like:
         return 0
+
+    if dry_run:
+        print(
+            f"\n🔍 DRY RUN: Would like {len(songs_to_like)} songs (not actually liking)"
+        )
+        return len(songs_to_like)
 
     print(f"\n👍 Liking {len(songs_to_like)} songs concurrently...")
     liked_count = 0
@@ -554,8 +619,19 @@ def load_ytm_library(ytm_safe: ThreadSafeYTMusic) -> Set[str]:
     return liked_video_ids
 
 
-def main():
+def main() -> None:
     """Main execution with all optimizations"""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description="Transfer Spotify liked songs to YouTube Music"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Search only, don't actually like songs on YouTube Music",
+    )
+    args = parser.parse_args()
+
     # Check YouTube Music credentials FIRST
     if not YTM_CLIENT_ID or not YTM_CLIENT_SECRET:
         print("❌ Error: YTM_CLIENT_ID and YTM_CLIENT_SECRET must be set")
@@ -612,6 +688,7 @@ def main():
     start_idx = cache_manager.progress.get("processed", 0)
     if start_idx > 0:
         print(f"♻️  Resuming from song {start_idx}")
+        cache_manager.prime_completed(start_idx)
         liked = liked[start_idx:]
 
     # Search for all songs concurrently
@@ -673,7 +750,9 @@ def main():
 
     # Like songs concurrently
     like_start_time = time.time()
-    total_liked = like_songs_concurrent(ytm_safe, songs_to_like, cache_manager)
+    total_liked = like_songs_concurrent(
+        ytm_safe, songs_to_like, cache_manager, args.dry_run
+    )
     like_time = time.time() - like_start_time
 
     if songs_to_like:
@@ -707,7 +786,10 @@ def main():
     # Final summary
     total_time = time.time() - start_time
     print("\n" + "=" * 60)
-    print("🎉 Like Transfer Complete!")
+    if args.dry_run:
+        print("🔍 DRY RUN Complete!")
+    else:
+        print("🎉 Like Transfer Complete!")
     print("=" * 60)
     print(f"⏱️  Total time: {total_time:.1f} seconds")
     print(f"📊 Overall performance: {len(liked)/total_time:.1f} songs/sec")

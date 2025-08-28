@@ -53,8 +53,8 @@ def setup_oauth():
         print("a) Add them to your .env file as YTM_CLIENT_ID and YTM_CLIENT_SECRET")
         print("b) Enter them here (they will be used for this session only)")
 
-        use_manual = input("\nEnter credentials now? (y/n): ").lower()
-        if use_manual == "y":
+        use_manual = input("\nEnter credentials now? (y/n): ").strip().lower()
+        if use_manual in ["y", "yes"]:
             client_id = input("Enter YouTube Client ID: ").strip()
             client_secret = input("Enter YouTube Client Secret: ").strip()
         else:
@@ -69,10 +69,12 @@ def setup_oauth():
 
     # Check if oauth.json already exists
     if Path(oauth_path).exists():
-        overwrite = input(
-            f"\n⚠️  {oauth_path} already exists. Overwrite? (y/n): "
-        ).lower()
-        if overwrite != "y":
+        overwrite = (
+            input(f"\n⚠️  {oauth_path} already exists. Overwrite? (y/n): ")
+            .strip()
+            .lower()
+        )
+        if overwrite not in ["y", "yes"]:
             print("Setup cancelled")
             return False
 
@@ -93,7 +95,10 @@ def setup_oauth():
 
     try:
         print("\n📱 Starting OAuth flow...")
-        print("This will open a browser window for authentication.")
+        print(
+            "Note: With TVs and Limited Input devices flow, "
+            "you may receive a URL and code to enter."
+        )
         print("Follow the instructions to authorize the application.\n")
 
         result = subprocess.run(cmd, capture_output=False, text=True, check=False)
